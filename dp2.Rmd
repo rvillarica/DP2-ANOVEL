@@ -1,0 +1,308 @@
+---
+title: "Data Project 2 - A Novel Analysis"
+output: html_notebook
+---
+
+First, we scrape data from the Goodreads popularity-by-date URL from 1989-2019, selecting the top 50 books for each.  
+```{r}
+library(rvest)
+library(httr)
+library(stringr)
+library(plyr)
+library(tm)
+library(lubridate)
+
+httr::set_config(config(ssl_verifypeer = 0L)) 
+
+years <- as.character(1989:2019)
+
+allBookUrls <- c()
+
+book.urls.df <- data.frame(year = character(),url = character())
+for (yr in years) {
+  #don't overload the server
+  Sys.sleep(2.5)
+  url <- paste("https://www.goodreads.com/book/popular_by_date/",yr,"/",sep="")
+  print(url)
+  bookList <- read_html(url)
+  books <- html_nodes(bookList, ".bookTitle")
+  bookUrls <- html_attr(books,"href")
+  top50BookUrls <- head(bookUrls,50)
+  print(top50BookUrls)
+  allBookUrls <- c(allBookUrls,top50BookUrls)
+}
+
+#so we don't have to do this twice
+setwd("/Users/romvillarica")
+write.csv(allBookUrls,"book_urls.csv")
+```
+For each of these books, we then scrape the relevant information such that our final DataFrame has one row for every book found previously.  For this step, the WebScraper Chrome extension as well as the built-in Inspect Element feature helped immensely with figuring out the tags.
+```{r}
+raw.books.df <- data.frame(pubDate = character(),
+                       title = character(),
+                       author = character(),
+                       rating = character(),
+                       ratingCount = character(),
+                       reviewCount = character(),
+                       synopsis = character(),
+                       pageCount = character(),
+                       genres = character(),
+                       stringsAsFactors = F)
+
+for (url in allBookUrls) {
+  Sys.sleep(2)
+  formattedUrl <- paste("https://www.goodreads.com",url,sep="")
+  bookPage <- read_html(formattedUrl)
+  print(paste("reading from",formattedUrl))
+  title <- html_text(html_node(bookPage, "#bookTitle"))
+  author <- html_text(html_node(bookPage, "span[itemprop='name']"))
+  rating <- html_text(html_node(bookPage, "div.reviewControls--left:nth-of-type(1)"))
+  ratingCount <- html_text(html_node(bookPage, "a.gr-hyperlink:nth-of-type(2)"))
+  reviewCount <- html_text(html_node(bookPage, "a.gr-hyperlink:nth-of-type(3)"))
+  publishedDate <- html_text(html_node(bookPage, "div.row:nth-of-type(2)"))
+  synopsis <- html_text(html_node(bookPage, "#description"))
+  pageCount <- html_text(html_node(bookPage, "span[itemprop='numberOfPages']"))
+  genres <- paste(html_text(html_nodes(bookPage, ".left a.bookPageGenreLink")),sep = "",collapse=",")
+  row <- list(publishedDate,title,author,rating,ratingCount,reviewCount,synopsis,pageCount,genres)
+  raw.books.df[nrow(raw.books.df) + 1,] <- row
+}
+
+setwd("/Users/romvillarica")
+write.csv(raw.books.df,"raw_books.csv")
+```
+Now, we clean the data in order to produce cleaned.books.df, which has all columns in their proper types as well as human-readable synopses.
+```{r}
+setwd("/Users/romvillarica")
+raw.books.df <- read.csv("raw_books.csv")
+
+#function regex match out the publish year
+get_earliest_pub_year <- function(x) {
+  splitX <- unlist(strsplit(as.character(x),"\n"));
+  for (i in length(splitX):1) {
+    year <- str_extract(splitX[i], "[0-9]{4}")
+    if (!is.na(year)) {
+      return(year);
+      break;
+    }
+  }
+}
+cleaned.books.df <- raw.books.df
+#sapply to vectorize  
+cleaned.books.df$pubDate <- sapply(raw.books.df$pubDate,get_earliest_pub_year)
+
+#now, clean the synopses... get the max-length string in the split vector
+get_max_str <- function(x) {
+  splitX <- unlist(strsplit(as.character(x),"\n"))
+  maxLength <- -1
+  maxStr <- ""
+  for (str in splitX) {
+    if (!is.na(str)) {
+      if (nchar(str) > maxLength) {
+        maxStr <- str
+        maxLength <- nchar(str)
+      }
+    }
+  }
+  return(maxStr)
+}
+#again sapply to vectorize
+cleaned.books.df$synopsis <- sapply(raw.books.df$synopsis,get_max_str)
+
+#clean title with regex trim
+cleaned.books.df$title <- gsub("^\\s+|\\s+$", "", raw.books.df$title)
+
+#clean author with regex trim
+cleaned.books.df$author <- gsub("^\\s+|\\s+$", "", raw.books.df$author)
+
+#regex match the rating
+match_out_rating <- function(x) {
+    rating <- str_extract(as.character(x), "[0-9]\\.[0-9]{2}")
+    return(rating)
+}
+cleaned.books.df$rating <- sapply(raw.books.df$rating,match_out_rating)
+
+#clean ratingCount, reviewCount, and pageCount by replacing everything that's not a number
+cleaned.books.df$ratingCount <- gsub("[^0-9]", "", raw.books.df$ratingCount)
+cleaned.books.df$reviewCount <- gsub("[^0-9]", "", raw.books.df$reviewCount)
+cleaned.books.df$pageCount <- gsub("[^0-9]", "", raw.books.df$pageCount)
+
+#now: for all numeric / date stuff, convert to numbers / datetime
+cleaned.books.df$pubDate <- as_date(paste(cleaned.books.df$pubDate,"-01-01",sep=""))
+cleaned.books.df$rating <- as.numeric(cleaned.books.df$rating)
+cleaned.books.df$ratingCount <- as.numeric(cleaned.books.df$ratingCount)
+cleaned.books.df$reviewCount <- as.numeric(cleaned.books.df$reviewCount)
+cleaned.books.df$pageCount <- as.numeric(cleaned.books.df$pageCount)
+
+#handle genres: first, identify all genres listed, then paste them together, then get stats
+genreStr <- paste(cleaned.books.df$genres,sep=",",collapse=",")
+genreVec <- unlist(strsplit(genreStr,","))
+genre.frame <- as.data.frame(table(genreVec))
+#sort descending to see most common genres
+genre.frame <- genre.frame[order(-genre.frame$Freq),] 
+
+print(genre.frame)
+```
+From this, we take the top 10 genres:
+```{r}
+top10Genres <- head(genre.frame$genreVec,10)
+```
+We create a binary variable for each of these genres, then flag all the books based on their genre string.
+```{r}
+for (g in top10Genres) {
+  cleaned.books.df[g] = as.integer(grepl(g, cleaned.books.df$genres))
+}
+
+setwd("/Users/romvillarica")
+write.csv(cleaned.books.df,"clean_books.csv")
+```
+Now, we're ready to do analysis!
+```{r}
+library(tidytext)
+library(topicmodels) 
+library(wordcloud)
+library(fmsb)
+library(ggplot2)
+setwd("/Users/romvillarica")
+cleaned.books.df <- read.csv("clean_books.csv")
+
+#sanity-check convert to numeric
+cleaned.books.df$pubDate <- as_date(cleaned.books.df$pubDate)
+cleaned.books.df$rating <- as.numeric(cleaned.books.df$rating)
+cleaned.books.df$ratingCount <- as.numeric(cleaned.books.df$ratingCount)
+cleaned.books.df$reviewCount <- as.numeric(cleaned.books.df$reviewCount)
+cleaned.books.df$pageCount <- as.numeric(cleaned.books.df$pageCount)
+
+#fix .s in col names
+colnames(cleaned.books.df) <- gsub("\\."," ",colnames(cleaned.books.df))
+
+for (g in top10Genres) {
+  cleaned.books.df.genre <- cleaned.books.df[which(cleaned.books.df[g]==1),]
+  synopsis.corp <- VCorpus(VectorSource(cleaned.books.df.genre$synopsis))
+  #clean it
+  synopsis.corp.clean <- tm_map(synopsis.corp, removePunctuation)
+  synopsis.corp.clean <- tm_map(synopsis.corp.clean, removeNumbers)
+  synopsis.corp.clean <- tm_map(synopsis.corp.clean, content_transformer(tolower),lazy=TRUE)
+  
+  #make words stems
+  synopsis.corp.clean.stem <- tm_map(synopsis.corp.clean, content_transformer(stemDocument),lazy=TRUE)
+  #kill stopwords and whitespace
+  synopsis.corp.clean.stem <- tm_map(synopsis.corp.clean.stem,content_transformer(removeWords),stopwords("english"))
+  synopsis.corp.clean.stem <- tm_map(synopsis.corp.clean.stem,stripWhitespace)
+  dtm <- DocumentTermMatrix(synopsis.corp.clean.stem)
+  
+  #remove sparse terms
+  dtms <- removeSparseTerms(dtm, 0.995)
+  #convert to matrix
+  dtm_matrix <- as.matrix(dtms)
+  
+  #wordcloud on most-popular synopsis words, by genre identified
+  dtms.as.df <- tidy(dtms)
+
+  dtms.as.df.agg <- aggregate(dtms.as.df$count, by=list(term=dtms.as.df$term), FUN=sum)
+  dtms.as.df.agg = dtms.as.df.agg[order(-dtms.as.df.agg$x),] 
+  
+  top30Words <- head(dtms.as.df.agg$term,30)
+  top30Count <- head(dtms.as.df.agg$x,30)
+  
+  wordcloud(words=top30Words,freq=top30Count,colors=brewer.pal(8, "Spectral"),scale=c(4,.5))
+  title(paste("Wordcloud:",g))
+  
+  #we create this dtm to get non-stemmed words to feed into sentiment analysis
+  dtm_sentiment <- DocumentTermMatrix(synopsis.corp.clean)
+  dtm.sentiment.as.df <- tidy(dtm_sentiment)
+
+  #label "term" as "word" for the join...
+  colnames(dtm.sentiment.as.df) = c("document","word","count")
+  sentiment.df <- merge(x = dtm.sentiment.as.df, y = get_sentiments("nrc"), by = "word", all.y = TRUE)
+  sentiment.df <- sentiment.df[which(!is.na(sentiment.df$count)),]
+  sentiment.df.agg <- aggregate(sentiment.df$count, by=list(sentiment=sentiment.df$sentiment), FUN=sum)
+  
+  #remove positive and negative, do pie chart for that
+  sentiment.df.posneg <- sentiment.df.agg[which(sentiment.df.agg$sentiment == "negative" | sentiment.df.agg$sentiment == "positive"),]
+  
+  pie(sentiment.df.posneg$x/max(sentiment.df.posneg$x),labels = sentiment.df.posneg$sentiment, col=rainbow(length(sentiment.df.posneg$sentiment)),
+   main=paste("Sentiment (binary):",g))
+  
+  sentiment.df.others <- sentiment.df.agg[which(sentiment.df.agg$sentiment != "negative" & sentiment.df.agg$sentiment != "positive"),]
+
+  #transpose to get into radarchart form
+  t.sentiment.df.others<- rbind(sentiment.df.others$sentiment,sentiment.df.others$x)
+  t.sentiment.df.others <- as.numeric(t.sentiment.df.others[2,])
+  t.sentiment.df.others <- rbind(max(t.sentiment.df.others),min(t.sentiment.df.others),t.sentiment.df.others)
+  colnames(t.sentiment.df.others) <- sentiment.df.others$sentiment
+
+  radarchart(as.data.frame(t.sentiment.df.others))
+  title(paste("Sentiment:",g))
+}
+
+```
+And now for modelling:
+```{r}
+library(Metrics)
+
+books.df.lm <- cleaned.books.df
+
+#features to test: page count, title word count, nrc sentiment distribution of synopsis, nrc pos/neg
+
+#returns a vector of percentages: (negative,positive),(anger,anticipation,disgust,fear,joy,sadness,surprise,trust)
+get_sentiment_dist <- function(x) {
+  tryCatch({
+    x <- tolower(x)
+    vec <- unlist(strsplit(x," "))
+    temp.df <- as.data.frame(table(vec))
+    colnames(temp.df) = c("word","count")
+    temp.sentiment.df <- merge(x = temp.df, y = get_sentiments("nrc"), by = "word", all.y = TRUE)
+    temp.sentiment.df <- temp.sentiment.df[which(!is.na(temp.sentiment.df$count)),]
+    temp.sentiment.df.agg <- aggregate(temp.sentiment.df$count, by=list(sentiment=temp.sentiment.df$sentiment), FUN=sum)
+    temp.sentiment.df.posneg <- temp.sentiment.df.agg[which(temp.sentiment.df.agg$sentiment == "negative" | temp.sentiment.df.agg$sentiment == "positive"),]
+    temp.sentiment.df.posneg$x <- temp.sentiment.df.posneg$x / sum(temp.sentiment.df.posneg$x)
+    temp.sentiment.df.others <- temp.sentiment.df.agg[which(temp.sentiment.df.agg$sentiment != "negative" & temp.sentiment.df.agg$sentiment != "positive"),]
+    temp.sentiment.df.others$x <- temp.sentiment.df.others$x / sum(temp.sentiment.df.others$x)
+    ret <- c(temp.sentiment.df.posneg$x,temp.sentiment.df.others$x)
+    return(ret)
+  }, error = function(e) {
+      return(c(0,0,0,0,0,0,0,0,0,0))
+  })
+}
+
+sentiments.df <- data.frame(matrix(ncol = 10, nrow = 0))
+colnames(sentiments.df) <- sentiments
+sentiments.df <- sapply(books.df.lm$synopsis,get_sentiment_dist)
+
+sentiments.df.real <- data.frame(matrix(ncol = 10, nrow = 0))
+for (i in c(1:length(sentiments.df))) {
+  sentiments.df.real <- rbind(sentiments.df.real,unlist(sentiments.df[i]))
+}
+colnames(sentiments.df.real) <- sentiments
+
+books.df.lm <- cbind(books.df.lm,sentiments.df.real)
+books.df.lm <- sapply(books.df.lm$synopsis, get_num_words)
+
+get_num_words <- function(x) {
+  splitX <- unlist(strsplit(as.character(x)," "))
+  return(length(splitX))
+}
+
+books.df.lm$titleWordCount <- sapply(books.df.lm$title, get_num_words)
+books.df.lm$synopsisWordCount <- sapply(books.df.lm$synopsis, get_num_words)
+
+books.df.lm$success <- (books.df.lm$rating / 5) * books.df.lm$reviewCount
+
+#split into train and test
+sample_size <- floor(0.80 * nrow(books.df.lm))
+set.seed(245)
+train_ind <- sample(seq_len(nrow(books.df.lm)), size = sample_size)
+books.train <- books.df.lm[train_ind, ]
+books.test <- books.df.lm[-train_ind, ]
+
+#now, we build the model
+model <- lm(d, data=books.train)
+
+pred = predict(model, newdata = books.test)
+
+#to test it: the naive predictor should predict the mean value every single time, if rmsq(ours) beats rmsq(mean) then it's better
+predValue <- rmse(books.test$success,pred)
+naiveValue <- rmse(books.test$success,mean(books.train$success))
+percentImprovement <- ((naiveValue-predValue)/naiveValue)*100
+```
+
