@@ -110,8 +110,9 @@ server <- function(input, output) {
     colnames(t.sentiment.df.others) <- sentiment.df.others$sentiment
     
     par(mar=rep(1,4)) 
-    pie(sentiment.df.posneg$x/max(sentiment.df.posneg$x),labels = sentiment.df.posneg$sentiment, col=rainbow(length(sentiment.df.posneg$sentiment)),
-        main=paste("Overall Sentiment"))
+  
+    pie(sentiment.df.posneg$x/sum(sentiment.df.posneg$x),labels = sentiment.df.posneg$sentiment, col=c(rgb(242/255,125/255,114/255,0.9),rgb(181/255,219/255,169/255,0.9)),
+        main=paste("Overall Sentiment"),border=NA)
   })
   
   output$radar <- renderPlot({
@@ -137,7 +138,19 @@ server <- function(input, output) {
     colnames(t.sentiment.df.others) <- sentiment.df.others$sentiment
     
     par(mar=rep(1,4)) 
-    radarchart(as.data.frame(t.sentiment.df.others))
+    
+    colors_border=c( rgb(181/255,219/255,169/255,0.9) )
+    colors_in=c( rgb(181/255,219/255,169/255,0.4) )
+    
+    radarchart(as.data.frame(t.sentiment.df.others), 
+               #custom polygon
+               pcol=colors_border , pfcol=colors_in , plwd=4 , plty=1,
+               #custom the grid
+               cglcol="grey", cglty=1, axislabcol="grey", caxislabels=seq(0,20,5), cglwd=0.8,
+               #custom labels
+               vlcex=0.8 
+    )
+    
     title(paste("Sentiment"))
   })
 }
